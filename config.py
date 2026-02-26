@@ -16,7 +16,13 @@ ADMIN_ID = 1190237801
 # ============================================
 
 SOURCE_CHANNEL_ID = -1002682552255
-PREDICTION_CHANNEL_ID = -1003725380926
+
+# PLUSIEURS CANAUX DE PRÉDICTION (liste)
+PREDICTION_CHANNEL_IDS = [
+    -1003725380926,  # Canal principal
+    # -1001234567890,  # Canal secondaire (décommentez pour ajouter)
+    # -1000987654321,  # Canal tertiaire (décommentez pour ajouter)
+]
 
 # ============================================
 # CONFIGURATION SERVEUR
