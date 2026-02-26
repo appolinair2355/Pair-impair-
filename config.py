@@ -29,4 +29,4 @@ PORT = 10000
 # ============================================
 
 DEFAULT_AUTO_CHECK_INTERVAL = 20
-MAX_HISTORY_SIZE = 100
+MAX_HISTORY_SIZE = 1000
