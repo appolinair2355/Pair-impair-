@@ -115,7 +115,6 @@ def calculate_gap_stats_from_window():
     if len(games_history) < GAMES_FOR_ANALYSIS:
         return False
     
-    # Prendre les 20 derniers jeux triés par numéro
     sorted_games = sorted(games_history.items(), key=lambda x: x[0])[-GAMES_FOR_ANALYSIS:]
     
     even_gaps = []
@@ -136,7 +135,6 @@ def calculate_gap_stats_from_window():
                 odd_gaps.append(gap)
             last_odd_idx = idx
     
-    # Écart max = le plus grand écart observé
     old_even_gap = auto_even_gap
     old_odd_gap = auto_odd_gap
     
@@ -150,7 +148,6 @@ def calculate_gap_stats_from_window():
     
     initial_analysis_done = True
     
-    # Notifier si changement significatif
     if old_even_gap != auto_even_gap or old_odd_gap != auto_odd_gap:
         logger.info(f"📊 Écarts mis à jour - PAIR: {old_even_gap}→{auto_even_gap}, IMPAIR: {old_odd_gap}→{auto_odd_gap}")
     
@@ -168,7 +165,6 @@ def calculate_current_streaks():
     current_even_streak = 0
     current_odd_streak = 0
     
-    # Parcourir à l'envers pour trouver la série en cours
     for game_num, game_data in reversed(sorted_games):
         is_even_result = game_data['is_even']
         
@@ -201,18 +197,15 @@ def should_predict() -> tuple:
         if not calculate_gap_stats_from_window():
             return (False, None)
     
-    # Vérifier si prédiction en cours
     active_predictions = [p for p in pending_predictions.values() if p['status'] == '🔮']
     if active_predictions:
         return (False, None)
     
-    # Recalculer séries
     calculate_current_streaks()
     
     even_threshold = auto_even_gap if auto_mode else max_even_gap
     odd_threshold = auto_odd_gap if auto_mode else max_odd_gap
     
-    # Seuil = écart_max - 1
     if current_even_streak >= (even_threshold - 1) and current_even_streak > 0:
         return (True, "IMPAIR")
     
@@ -231,7 +224,6 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         message_ids = {}
         
-        # Envoyer à tous les canaux de prédiction
         for channel_id in PREDICTION_CHANNEL_IDS:
             if channel_id and channel_id != 0:
                 try:
@@ -247,7 +239,7 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         pending_predictions[target_game] = {
             'prediction': prediction,
-            'message_ids': message_ids,  # Stockage multi-canaux
+            'message_ids': message_ids,
             'status': '🔮',
             'created_at': datetime.now().isoformat(),
             'check_count': 0,
@@ -256,7 +248,6 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         total_predictions_made += 1
         
-        # Notifier admin
         channels_str = ', '.join([str(c) for c in message_ids.keys() if message_ids[c] != 0])
         await notify_admin(f"🔮 Nouvelle prédiction: Jeu #{target_game} = {prediction}\n"
                           f"📡 Canaux: {channels_str}\n"
@@ -293,7 +284,6 @@ async def update_prediction_status(game_number: int, new_status: str, won_at_off
         
         updated_msg = f"🎯 Jeu #{game_number} : {emoji} {prediction}\n{status_text}"
         
-        # Mettre à jour sur tous les canaux
         updated_channels = []
         for channel_id, msg_id in message_ids.items():
             if channel_id and msg_id > 0:
@@ -309,12 +299,12 @@ async def update_prediction_status(game_number: int, new_status: str, won_at_off
             total_predictions_won += 1
             del pending_predictions[game_number]
             await notify_admin(f"✅ Prédiction #{game_number} GAGNÉE {status_text}\n"
-                              f"📡 Canaux mis à jour: {', '.join(updated_channels)}")
+                              f"📡 Canaux: {', '.join(updated_channels)}")
         elif new_status == '❌':
             total_predictions_lost += 1
             del pending_predictions[game_number]
             await notify_admin(f"❌ Prédiction #{game_number} PERDUE\n"
-                              f"📡 Canaux mis à jour: {', '.join(updated_channels)}")
+                              f"📡 Canaux: {', '.join(updated_channels)}")
         
         return True
         
@@ -361,7 +351,10 @@ async def notify_admin(message: str):
 
 async def process_message(message_text: str, chat_id: int, is_edit: bool = False):
     """Traite un message."""
-    global last_game_number, last_total
+    # DÉCLARATION GLOBALE CORRIGÉE - Toutes les variables modifiées
+    global last_game_number, last_total, total_even_count, total_odd_count
+    global current_even_streak, current_odd_streak, initial_analysis_done
+    global games_history, pending_finalization
     
     try:
         game_number = extract_game_number(message_text)
@@ -394,6 +387,7 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
             
             is_even_result = is_even(total)
             
+            # Incrémentation des compteurs globaux
             if is_even_result:
                 total_even_count += 1
             else:
@@ -431,6 +425,8 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
             
     except Exception as e:
         logger.error(f"Erreur traitement: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 # --- Gestionnaires d'Événements ---
 
