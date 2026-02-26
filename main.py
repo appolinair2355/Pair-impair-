@@ -41,20 +41,24 @@ session_string = os.getenv('TELEGRAM_SESSION', '')
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # --- Variables Globales d'État ---
-# Historique des jeux: {game_number: {'total': int, 'is_even': bool, 'timestamp': str}}
+# Historique des jeux: {game_number: {'total': int, 'is_even': bool, 'timestamp': str, 'status': str}}
 games_history = {}
 
-# Prédictions actives: {target_game: {'prediction': 'PAIR'/'IMPAIR', 'message_id': int, 'status': str, 'created_at': str}}
+# Messages en attente de finalisation: {game_number: {'message_text': str, 'received_at': datetime}}
+pending_finalization = {}
+
+# Prédictions actives: {target_game: {'prediction': 'PAIR'/'IMPAIR', 'message_id': int, 'status': str, 
+#                                    'created_at': str, 'check_count': int, 'last_check': datetime}}
 pending_predictions = {}
 
 # Compteurs pour les écarts
-current_even_streak = 0  # Série actuelle de pairs consécutifs
-current_odd_streak = 0   # Série actuelle d'impairs consécutifs
+current_even_streak = 0
+current_odd_streak = 0
 
 # Configuration des écarts
-max_even_gap = 3  # Écart max entre numéros pairs (défaut)
-max_odd_gap = 3   # Écart max entre numéros impairs (défaut)
-auto_mode = True  # Mode automatique par défaut
+max_even_gap = 3
+max_odd_gap = 3
+auto_mode = True
 
 # Statistiques des écarts calculés automatiquement
 auto_even_gap = 3
@@ -75,6 +79,10 @@ total_predictions_lost = 0
 source_channel_ok = False
 prediction_channel_ok = False
 
+# Configuration fenêtre de prédiction
+PREDICTION_WINDOW = 3
+PREDICTION_TIMEOUT_MINUTES = 20
+
 # --- Fonctions d'Analyse ---
 
 def extract_game_number(message: str):
@@ -86,11 +94,9 @@ def extract_game_number(message: str):
 
 def extract_total_value(message: str):
     """Extrait la valeur totale (#T) du message."""
-    # Cherche #T suivi d'un nombre
     match = re.search(r"#T\s*(\d+)", message, re.IGNORECASE)
     if match:
         return int(match.group(1))
-    # Alternative: chercher un nombre après "Total" ou dans un format spécifique
     match = re.search(r"[Tt]otal[\s:]*(\d+)", message)
     if match:
         return int(match.group(1))
@@ -101,10 +107,25 @@ def is_even(number: int) -> bool:
     return number % 2 == 0
 
 def is_message_finalized(message: str) -> bool:
-    """Vérifie si le message est un résultat final (non en cours)."""
-    if '⏰' in message:
-        return False
-    return '✅' in message or '🔰' in message or '#T' in message
+    """Vérifie si le message est un résultat final (contient ✅ ou 🔰)."""
+    return '✅' in message or '🔰' in message
+
+def is_message_pending(message: str) -> bool:
+    """Vérifie si le message est en cours (contient ⏰ ou ▶️)."""
+    return '⏰' in message or '▶️' in message
+
+def get_message_status(message: str) -> str:
+    """
+    Retourne le statut du message:
+    - 'finalized' : message final (✅ ou 🔰)
+    - 'pending' : message en cours (⏰ ou ▶️)
+    - 'unknown' : statut inconnu
+    """
+    if is_message_finalized(message):
+        return 'finalized'
+    elif is_message_pending(message):
+        return 'pending'
+    return 'unknown'
 
 # --- Logique de Calcul des Écarts ---
 
@@ -115,10 +136,8 @@ def calculate_gap_stats():
     if len(games_history) < 10:
         return
     
-    # Trier les jeux par numéro
     sorted_games = sorted(games_history.items(), key=lambda x: x[0])
     
-    # Calculer les écarts entre pairs consécutifs
     even_gaps = []
     odd_gaps = []
     
@@ -135,16 +154,15 @@ def calculate_gap_stats():
                 odd_gaps.append(game_num - last_odd_game)
             last_odd_game = game_num
     
-    # Calculer les écarts max (utiliser le 90e percentile pour éviter les outliers)
     if even_gaps:
         even_gaps_sorted = sorted(even_gaps)
         auto_even_gap = even_gaps_sorted[int(len(even_gaps_sorted) * 0.9)] if even_gaps_sorted else 3
-        auto_even_gap = max(2, min(auto_even_gap, 6))  # Limiter entre 2 et 6
+        auto_even_gap = max(2, min(auto_even_gap, 6))
     
     if odd_gaps:
         odd_gaps_sorted = sorted(odd_gaps)
         auto_odd_gap = odd_gaps_sorted[int(len(odd_gaps_sorted) * 0.9)] if odd_gaps_sorted else 3
-        auto_odd_gap = max(2, min(auto_odd_gap, 6))  # Limiter entre 2 et 6
+        auto_odd_gap = max(2, min(auto_odd_gap, 6))
     
     logger.info(f"📊 Stats auto calculées - Écart Pair max: {auto_even_gap}, Écart Impair max: {auto_odd_gap}")
 
@@ -157,17 +175,20 @@ def should_predict() -> tuple:
     """
     global max_even_gap, max_odd_gap
     
-    # Utiliser les valeurs auto ou manuelles selon le mode
+    # Ne pas prédire si des prédictions sont encore en cours de vérification
+    active_predictions = [p for p in pending_predictions.values() if p['status'] == '🔮']
+    if active_predictions:
+        logger.info(f"⏳ Prédiction(s) active(s) en cours de vérification, attente...")
+        return (False, None)
+    
     even_threshold = auto_even_gap if auto_mode else max_even_gap
     odd_threshold = auto_odd_gap if auto_mode else max_odd_gap
     
-    # Si on a une série de pairs consécutifs atteignant le max
     if current_even_streak >= even_threshold:
-        return (True, "IMPAIR")  # Prédire impair après une longue série de pairs
+        return (True, "IMPAIR")
     
-    # Si on a une série d'impairs consécutifs atteignant le max
     if current_odd_streak >= odd_threshold:
-        return (True, "PAIR")  # Prédire pair après une longue série d'impairs
+        return (True, "PAIR")
     
     return (False, None)
 
@@ -177,7 +198,8 @@ async def send_prediction_to_channel(target_game: int, prediction: str):
     
     try:
         emoji = "🔵" if prediction == "PAIR" else "🔴"
-        prediction_msg = f"🎯 Prédiction Jeu #{target_game}: {emoji} {prediction}\n📊 Statut: 🔮 En attente"
+        prediction_msg = (f"🎯 Prédiction Jeu #{target_game}: {emoji} {prediction}\n"
+                         f"📊 Statut: 🔮 En attente (vérification sur {PREDICTION_WINDOW} jeux)")
         
         msg_id = 0
         
@@ -195,7 +217,9 @@ async def send_prediction_to_channel(target_game: int, prediction: str):
             'prediction': prediction,
             'message_id': msg_id,
             'status': '🔮',
-            'created_at': datetime.now().isoformat()
+            'created_at': datetime.now().isoformat(),
+            'check_count': 0,
+            'last_check': datetime.now()
         }
         
         total_predictions_made += 1
@@ -205,7 +229,7 @@ async def send_prediction_to_channel(target_game: int, prediction: str):
         logger.error(f"Erreur envoi prédiction: {e}")
         return None
 
-async def update_prediction_status(game_number: int, new_status: str):
+async def update_prediction_status(game_number: int, new_status: str, won_at_offset: int = None):
     """Met à jour le statut d'une prédiction."""
     global total_predictions_won, total_predictions_lost
     
@@ -218,19 +242,28 @@ async def update_prediction_status(game_number: int, new_status: str):
         prediction = pred['prediction']
         
         emoji = "🔵" if prediction == "PAIR" else "🔴"
-        updated_msg = f"🎯 Prédiction Jeu #{game_number}: {emoji} {prediction}\n📊 Statut: {new_status}"
+        
+        # Format du statut avec indicateur de décalage
+        if new_status.startswith('✅') and won_at_offset is not None:
+            offset_emoji = ['0️⃣', '1️⃣', '2️⃣'][won_at_offset] if won_at_offset < 3 else f"+{won_at_offset}"
+            status_text = f"✅{offset_emoji} GAGNÉ"
+        elif new_status == '❌ PERDU':
+            status_text = "❌ PERDU"
+        else:
+            status_text = new_status
+        
+        updated_msg = f"🎯 Prédiction Jeu #{game_number}: {emoji} {prediction}\n📊 Statut: {status_text}"
         
         if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and message_id > 0 and prediction_channel_ok:
             try:
                 await client.edit_message(PREDICTION_CHANNEL_ID, message_id, updated_msg)
-                logger.info(f"✅ Prédiction #{game_number} mise à jour: {new_status}")
+                logger.info(f"✅ Prédiction #{game_number} mise à jour: {status_text}")
             except Exception as e:
                 logger.error(f"❌ Erreur mise à jour dans le canal: {e}")
         
-        pred['status'] = new_status
+        pred['status'] = status_text
         
-        # Mettre à jour les compteurs
-        if new_status == '✅ GAGNÉ':
+        if new_status.startswith('✅'):
             total_predictions_won += 1
             del pending_predictions[game_number]
         elif new_status == '❌ PERDU':
@@ -244,90 +277,162 @@ async def update_prediction_status(game_number: int, new_status: str):
         return False
 
 async def check_prediction_result(game_number: int, total: int, is_even: bool):
-    """Vérifie si une prédiction active correspond au résultat."""
-    if game_number in pending_predictions:
-        pred = pending_predictions[game_number]
-        predicted_type = pred['prediction']
+    """
+    Vérifie si une prédiction active correspond au résultat.
+    Logique: vérifie sur 3 jeux avec indicateur de décalage (0, 1, 2).
+    """
+    for pred_game_num, pred_data in list(pending_predictions.items()):
+        if pred_data['status'] != '🔮':
+            continue
+            
+        # Calculer le décalage (0 = jeu prédit, 1 = +1, 2 = +2)
+        offset = game_number - pred_game_num
         
-        # Vérifier si la prédiction est correcte
-        if (predicted_type == "PAIR" and is_even) or (predicted_type == "IMPAIR" and not is_even):
-            await update_prediction_status(game_number, '✅ GAGNÉ')
-            logger.info(f"🎉 Prédiction #{game_number} GAGNÉE! Attendu: {predicted_type}, Reçu: {total} ({'PAIR' if is_even else 'IMPAIR'})")
-        else:
-            await update_prediction_status(game_number, '❌ PERDU')
-            logger.info(f"😞 Prédiction #{game_number} PERDUE! Attendu: {predicted_type}, Reçu: {total} ({'PAIR' if is_even else 'IMPAIR'})")
+        # Vérifier si ce jeu est dans la fenêtre de prédiction (0, 1, ou 2)
+        if 0 <= offset < PREDICTION_WINDOW:
+            predicted_type = pred_data['prediction']
+            is_correct = (predicted_type == "PAIR" and is_even) or (predicted_type == "IMPAIR" and not is_even)
+            
+            if is_correct:
+                # 🎉 GAGNÉ à ce décalage !
+                await update_prediction_status(pred_game_num, '✅ GAGNÉ', offset)
+                logger.info(f"🎉 Prédiction #{pred_game_num} GAGNÉE au décalage {offset} "
+                           f"(jeu #{game_number})! Attendu: {predicted_type}, Reçu: {total}")
+                return
+            
+            else:
+                # Incrémenter le compteur de vérification
+                pred_data['check_count'] += 1
+                pred_data['last_check'] = datetime.now()
+                
+                # Vérifier si on a atteint la fin de la fenêtre
+                if pred_data['check_count'] >= PREDICTION_WINDOW:
+                    # ❌ PERDU après 3 vérifications
+                    await update_prediction_status(pred_game_num, '❌ PERDU', None)
+                    logger.info(f"😞 Prédiction #{pred_game_num} PERDUE après vérification sur "
+                               f"#{pred_game_num}, #{pred_game_num+1}, #{pred_game_num+2}")
+                
+                else:
+                    remaining = PREDICTION_WINDOW - pred_data['check_count']
+                    logger.info(f"⏳ Prédiction #{pred_game_num}: jeu #{game_number} ne correspond pas "
+                               f"({pred_data['check_count']}/{PREDICTION_WINDOW}, {remaining} restants)")
+
+async def check_prediction_timeouts():
+    """Vérifie les prédictions en timeout et force la reprise."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Vérifier toutes les minutes
+            
+            now = datetime.now()
+            expired_predictions = []
+            
+            for game_num, pred_data in pending_predictions.items():
+                if pred_data['status'] != '🔮':
+                    continue
+                    
+                created_at = datetime.fromisoformat(pred_data['created_at'])
+                if now - created_at > timedelta(minutes=PREDICTION_TIMEOUT_MINUTES):
+                    expired_predictions.append(game_num)
+            
+            if expired_predictions:
+                logger.warning(f"🚨 {len(expired_predictions)} prédiction(s) en timeout après {PREDICTION_TIMEOUT_MINUTES}min!")
+                
+                for game_num in expired_predictions:
+                    if game_num in pending_predictions:
+                        del pending_predictions[game_num]
+                
+                logger.warning("🧹 Prédictions expirées effacées, reprise automatique activée")
+                
+        except Exception as e:
+            logger.error(f"Erreur vérification timeout: {e}")
 
 # --- Traitement des Messages ---
 
-async def process_finalized_message(message_text: str, chat_id: int):
-    """Traite un message finalisé du canal source."""
+async def process_message(message_text: str, chat_id: int, is_edit: bool = False):
+    """Traite un message du canal source (nouveau ou édité)."""
     global last_game_number, last_total, current_even_streak, current_odd_streak
     global total_even_count, total_odd_count
     
     try:
-        if not is_message_finalized(message_text):
-            return
-        
-        # Extraire le numéro de jeu
         game_number = extract_game_number(message_text)
         if game_number is None:
             return
         
-        # Extraire la valeur totale (#T)
         total = extract_total_value(message_text)
-        if total is None:
-            logger.warning(f"⚠️ Impossible d'extraire le total du message: {message_text[:100]}")
+        status = get_message_status(message_text)
+        
+        # Si message en attente (⏰ ou ▶️), stocker pour plus tard
+        if status == 'pending':
+            pending_finalization[game_number] = {
+                'message_text': message_text,
+                'received_at': datetime.now()
+            }
+            logger.info(f"⏳ Jeu #{game_number} en attente de finalisation...")
             return
         
-        # Déterminer si pair ou impair
-        is_even_result = is_even(total)
-        
-        logger.info(f"🎮 Jeu #{game_number} - Total: {total} ({'PAIR' if is_even_result else 'IMPAIR'})")
-        
-        # Mettre à jour les séries
-        if is_even_result:
-            current_even_streak += 1
-            current_odd_streak = 0
-            total_even_count += 1
-        else:
-            current_odd_streak += 1
-            current_even_streak = 0
-            total_odd_count += 1
-        
-        # Stocker dans l'historique
-        games_history[game_number] = {
-            'total': total,
-            'is_even': is_even_result,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Limiter la taille de l'historique
-        if len(games_history) > MAX_HISTORY_SIZE:
-            oldest = min(games_history.keys())
-            del games_history[oldest]
-        
-        # Vérifier si une prédiction active correspond
-        await check_prediction_result(game_number, total, is_even_result)
-        
-        # Recalculer les stats auto tous les 20 jeux
-        if game_number % DEFAULT_AUTO_CHECK_INTERVAL == 0 and auto_mode:
-            calculate_gap_stats()
-            logger.info(f"🔄 Recalcul auto des écarts au jeu #{game_number}")
-        
-        # Vérifier si on doit faire une prédiction
-        should_pred, prediction_type = should_predict()
-        
-        if should_pred and prediction_type:
-            target_game = game_number + 1
-            # Éviter les doublons
-            if target_game not in pending_predictions:
-                await send_prediction_to_channel(target_game, prediction_type)
-                logger.info(f"🔮 Prédiction créée: Jeu #{target_game} = {prediction_type} (Série Pairs: {current_even_streak}, Impairs: {current_odd_streak})")
-        
-        # Mettre à jour les variables globales
-        last_game_number = game_number
-        last_total = total
-        
+        # Si message finalisé (✅ ou 🔰)
+        if status == 'finalized':
+            # Vérifier si on avait un message en attente pour ce jeu
+            if game_number in pending_finalization:
+                del pending_finalization[game_number]
+            
+            if total is None:
+                logger.warning(f"⚠️ Impossible d'extraire le total du message: {message_text[:100]}")
+                return
+            
+            # Vérifier si ce jeu a déjà été traité
+            if game_number in games_history and not is_edit:
+                logger.info(f"🔄 Jeu #{game_number} déjà traité, ignoré")
+                return
+            
+            is_even_result = is_even(total)
+            
+            logger.info(f"🎮 Jeu #{game_number} - Total: {total} ({'PAIR' if is_even_result else 'IMPAIR'})")
+            
+            # Mettre à jour les séries
+            if is_even_result:
+                current_even_streak += 1
+                current_odd_streak = 0
+                total_even_count += 1
+            else:
+                current_odd_streak += 1
+                current_even_streak = 0
+                total_odd_count += 1
+            
+            # Stocker dans l'historique
+            games_history[game_number] = {
+                'total': total,
+                'is_even': is_even_result,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'finalized'
+            }
+            
+            # Limiter la taille de l'historique
+            if len(games_history) > MAX_HISTORY_SIZE:
+                oldest = min(games_history.keys())
+                del games_history[oldest]
+            
+            # Vérifier les prédictions
+            await check_prediction_result(game_number, total, is_even_result)
+            
+            # Recalculer les stats auto
+            if game_number % DEFAULT_AUTO_CHECK_INTERVAL == 0 and auto_mode:
+                calculate_gap_stats()
+                logger.info(f"🔄 Recalcul auto des écarts au jeu #{game_number}")
+            
+            # Vérifier si on doit faire une prédiction
+            should_pred, prediction_type = should_predict()
+            
+            if should_pred and prediction_type:
+                target_game = game_number + 1
+                if target_game not in pending_predictions:
+                    await send_prediction_to_channel(target_game, prediction_type)
+                    logger.info(f"🔮 Prédiction créée: Jeu #{target_game} = {prediction_type} "
+                               f"(Série Pairs: {current_even_streak}, Impairs: {current_odd_streak})")
+            
+            last_game_number = game_number
+            last_total = total
+            
     except Exception as e:
         logger.error(f"Erreur traitement message: {e}")
         import traceback
@@ -346,7 +451,7 @@ async def handle_message(event):
         
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            await process_finalized_message(message_text, chat_id)
+            await process_message(message_text, chat_id, is_edit=False)
     
     except Exception as e:
         logger.error(f"Erreur handle_message: {e}")
@@ -362,7 +467,7 @@ async def handle_edited_message(event):
         
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            await process_finalized_message(message_text, chat_id)
+            await process_message(message_text, chat_id, is_edit=True)
     
     except Exception as e:
         logger.error(f"Erreur handle_edited_message: {e}")
@@ -377,6 +482,8 @@ async def cmd_start(event):
         "🤖 **Bot de Prédiction Pair/Impair**\n\n"
         "Commandes disponibles:\n"
         "`/status` - Voir l'état du bot\n"
+        "`/info` - Info canaux et dernier numéro\n"
+        "`/histo` - Historique des 20 derniers jeux\n"
         "`/setmode auto` - Mode automatique\n"
         "`/setmode manual` - Mode manuel\n"
         "`/setgap pair <n>` - Définir écart max pair\n"
@@ -411,13 +518,99 @@ async def cmd_status(event):
         f"• Écart Pair max: {even_gap}\n"
         f"• Écart Impair max: {odd_gap}\n\n"
         f"🔮 **Prédictions:**\n"
-        f"• Actives: {len(pending_predictions)}\n"
+        f"• Actives: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}\n"
         f"• Total faites: {total_predictions_made}\n"
         f"• Gagnées: {total_predictions_won}\n"
         f"• Perdues: {total_predictions_lost}"
     )
     
     await event.respond(status_msg)
+
+@client.on(events.NewMessage(pattern='/info'))
+async def cmd_info(event):
+    """Commande info: canaux configurés et dernier numéro du canal source."""
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Commande réservée à l'administrateur")
+        return
+    
+    # Récupérer le dernier message du canal source pour vérifier
+    current_source_game = last_game_number
+    
+    info_msg = (
+        f"ℹ️ **Informations Configuration**\n\n"
+        f"📡 **Canaux configurés:**\n"
+        f"• Canal Source: `{SOURCE_CHANNEL_ID}`\n"
+        f"• Canal Prédiction: `{PREDICTION_CHANNEL_ID}`\n\n"
+        f"🎮 **Dernier numéro canal source:** `{current_source_game}`\n"
+        f"⏳ **En attente finalisation:** {len(pending_finalization)} jeu(x)\n"
+        f"🔮 **Prédictions en cours:** {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}"
+    )
+    
+    await event.respond(info_msg)
+
+@client.on(events.NewMessage(pattern='/histo'))
+async def cmd_histo(event):
+    """Commande histo: montre les 20 derniers jeux avec analyse des écarts."""
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Commande réservée à l'administrateur")
+        return
+    
+    if not games_history:
+        await event.respond("📭 Aucun historique disponible")
+        return
+    
+    # Récupérer les 20 derniers jeux
+    sorted_games = sorted(games_history.items(), key=lambda x: x[0], reverse=True)[:20]
+    sorted_games.reverse()  # Remettre dans l'ordre chronologique
+    
+    # Construire l'affichage
+    histo_lines = ["📜 **Historique des 20 derniers jeux**\n"]
+    
+    for game_num, game_data in sorted_games:
+        is_even_result = game_data['is_even']
+        emoji = "🔵 PAIR" if is_even_result else "🔴 IMPAIR"
+        total = game_data['total']
+        histo_lines.append(f"• Jeu #{game_num}: {total} → {emoji}")
+    
+    # Calculer les écarts actuels
+    even_games = [g[0] for g in sorted_games if g[1]['is_even']]
+    odd_games = [g[0] for g in sorted_games if not g[1]['is_even']]
+    
+    # Calculer les écarts entre pairs consécutifs
+    even_gaps = []
+    for i in range(1, len(even_games)):
+        even_gaps.append(even_games[i] - even_games[i-1])
+    
+    odd_gaps = []
+    for i in range(1, len(odd_games)):
+        odd_gaps.append(odd_games[i] - odd_games[i-1])
+    
+    even_max = max(even_gaps) if even_gaps else 0
+    even_avg = sum(even_gaps) / len(even_gaps) if even_gaps else 0
+    odd_max = max(odd_gaps) if odd_gaps else 0
+    odd_avg = sum(odd_gaps) / len(odd_gaps) if odd_gaps else 0
+    
+    histo_lines.append(f"\n📊 **Analyse des écarts (sur ces 20 jeux):**")
+    histo_lines.append(f"• Écart max PAIR observé: {even_max}")
+    histo_lines.append(f"• Moyenne écarts PAIR: {even_avg:.2f}")
+    histo_lines.append(f"• Écart max IMPAIR observé: {odd_max}")
+    histo_lines.append(f"• Moyenne écarts IMPAIR: {odd_avg:.2f}")
+    
+    # Montrer les écarts actuellement utilisés
+    if auto_mode:
+        histo_lines.append(f"\n🤖 **Seuils auto actuels:**")
+        histo_lines.append(f"• PAIR: {auto_even_gap}")
+        histo_lines.append(f"• IMPAIR: {auto_odd_gap}")
+    else:
+        histo_lines.append(f"\n👤 **Seuils manuels:**")
+        histo_lines.append(f"• PAIR: {max_even_gap}")
+        histo_lines.append(f"• IMPAIR: {max_odd_gap}")
+    
+    await event.respond("\n".join(histo_lines))
 
 @client.on(events.NewMessage(pattern='/setmode'))
 async def cmd_setmode(event):
@@ -492,7 +685,6 @@ async def cmd_stats(event):
         await event.respond("⛔ Commande réservée à l'administrateur")
         return
     
-    # Calculer les écarts depuis l'historique
     even_gaps = []
     odd_gaps = []
     last_even = None
@@ -547,12 +739,15 @@ async def cmd_help(event):
         "Le bot analyse les totaux (#T) des jeux et compte les écarts entre numéros pairs/impairs.\n\n"
         "**Logique de prédiction:**\n"
         "• Si une série de pairs atteint l'écart max → prédit IMPAIR\n"
-        "• Si une série d'impairs atteint l'écart max → prédit PAIR\n\n"
+        "• Si une série d'impairs atteint l'écart max → prédit PAIR\n"
+        "• Vérification sur 3 jeux avec indicateurs 0️⃣, 1️⃣, 2️⃣\n\n"
         "**Modes:**\n"
         "• **Automatique**: Le bot calcule les écarts max tous les 20 jeux\n"
         "• **Manuel**: Vous définissez les écarts avec `/setgap`\n\n"
         "**Commandes:**\n"
         "• `/status` - État actuel du bot\n"
+        "• `/info` - Canaux et dernier numéro source\n"
+        "• `/histo` - Historique des 20 derniers jeux\n"
         "• `/setmode auto/manual` - Changer de mode\n"
         "• `/setgap pair <n>` - Définir écart max pair (2-10)\n"
         "• `/setgap impair <n>` - Définir écart max impair (2-10)\n"
@@ -582,7 +777,7 @@ async def index(request):
             <p><strong>Dernier jeu:</strong> #{last_game_number}</p>
             <p><strong>Dernier total:</strong> {last_total}</p>
             <p><strong>Mode:</strong> {'Automatique' if auto_mode else 'Manuel'}</p>
-            <p><strong>Prédictions actives:</strong> {len(pending_predictions)}</p>
+            <p><strong>Prédictions actives:</strong> {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}</p>
         </div>
     </body>
     </html>"""
@@ -625,9 +820,11 @@ async def schedule_daily_reset():
         global games_history, pending_predictions, current_even_streak, current_odd_streak
         global total_even_count, total_odd_count, total_predictions_made
         global total_predictions_won, total_predictions_lost, last_game_number, last_total
+        global pending_finalization
         
         games_history.clear()
         pending_predictions.clear()
+        pending_finalization.clear()
         current_even_streak = 0
         current_odd_streak = 0
         total_even_count = 0
@@ -664,8 +861,9 @@ async def main():
             logger.error("Échec du démarrage du bot")
             return
         
-        # Lancer le reset quotidien en arrière-plan
+        # Lancer les tâches en arrière-plan
         asyncio.create_task(schedule_daily_reset())
+        asyncio.create_task(check_prediction_timeouts())
         
         logger.info("🚀 Bot complètement opérationnel!")
         await client.run_until_disconnected()
