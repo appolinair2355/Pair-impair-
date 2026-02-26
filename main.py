@@ -3,6 +3,7 @@ import asyncio
 import re
 import logging
 import sys
+import json
 from datetime import datetime, timedelta, timezone, time
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -63,7 +64,9 @@ total_predictions_won = 0
 total_predictions_lost = 0
 
 source_channel_ok = False
-prediction_channels_ok = []
+
+# Liste dynamique des canaux de prédiction (modifiable à la volée)
+DYNAMIC_PREDICTION_CHANNELS = list(PREDICTION_CHANNEL_IDS) if isinstance(PREDICTION_CHANNEL_IDS, list) else [PREDICTION_CHANNEL_IDS]
 
 PREDICTION_WINDOW = 3
 PREDICTION_TIMEOUT_MINUTES = 20
@@ -71,7 +74,32 @@ PREDICTION_TIMEOUT_MINUTES = 20
 initial_analysis_done = False
 GAMES_FOR_ANALYSIS = 20
 
+# Fichier de sauvegarde des canaux
+CHANNELS_FILE = 'dynamic_channels.json'
+
 # --- Fonctions Utilitaires ---
+
+def load_dynamic_channels():
+    """Charge les canaux dynamiques depuis le fichier."""
+    global DYNAMIC_PREDICTION_CHANNELS
+    try:
+        if os.path.exists(CHANNELS_FILE):
+            with open(CHANNELS_FILE, 'r') as f:
+                loaded = json.load(f)
+                if loaded:
+                    DYNAMIC_PREDICTION_CHANNELS = loaded
+                    logger.info(f"📂 Canaux chargés: {len(DYNAMIC_PREDICTION_CHANNELS)} canaux")
+    except Exception as e:
+        logger.error(f"Erreur chargement canaux: {e}")
+
+def save_dynamic_channels():
+    """Sauvegarde les canaux dynamiques dans le fichier."""
+    try:
+        with open(CHANNELS_FILE, 'w') as f:
+            json.dump(DYNAMIC_PREDICTION_CHANNELS, f)
+        logger.info(f"💾 Canaux sauvegardés: {len(DYNAMIC_PREDICTION_CHANNELS)} canaux")
+    except Exception as e:
+        logger.error(f"Erreur sauvegarde canaux: {e}")
 
 def extract_game_number(message: str):
     """Extrait le numéro de jeu (#N1074 ou #N 1074)."""
@@ -215,8 +243,8 @@ def should_predict() -> tuple:
     return (False, None)
 
 async def send_prediction_to_channels(target_game: int, prediction: str):
-    """Envoie la prédiction vers TOUS les canaux configurés."""
-    global total_predictions_made
+    """Envoie la prédiction vers TOUS les canaux configurés (dynamiques inclus)."""
+    global total_predictions_made, DYNAMIC_PREDICTION_CHANNELS
     
     try:
         emoji = "🔵" if prediction == "PAIR" else "🔴"
@@ -224,7 +252,8 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         message_ids = {}
         
-        for channel_id in PREDICTION_CHANNEL_IDS:
+        # Envoyer à tous les canaux dynamiques
+        for channel_id in DYNAMIC_PREDICTION_CHANNELS:
             if channel_id and channel_id != 0:
                 try:
                     pred_msg = await client.send_message(channel_id, prediction_msg)
@@ -250,7 +279,7 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         channels_str = ', '.join([str(c) for c in message_ids.keys() if message_ids[c] != 0])
         await notify_admin(f"🔮 Nouvelle prédiction: Jeu #{target_game} = {prediction}\n"
-                          f"📡 Canaux: {channels_str}\n"
+                          f"📡 Canaux ({len(DYNAMIC_PREDICTION_CHANNELS)}): {channels_str}\n"
                           f"📊 Séries: P={current_even_streak}/I={current_odd_streak}\n"
                           f"📈 Seuils: P={auto_even_gap}/I={auto_odd_gap}")
         
@@ -351,7 +380,6 @@ async def notify_admin(message: str):
 
 async def process_message(message_text: str, chat_id: int, is_edit: bool = False):
     """Traite un message."""
-    # DÉCLARATION GLOBALE CORRIGÉE - Toutes les variables modifiées
     global last_game_number, last_total, total_even_count, total_odd_count
     global current_even_streak, current_odd_streak, initial_analysis_done
     global games_history, pending_finalization
@@ -366,7 +394,6 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
         
         logger.info(f"📨 Jeu #{game_number} | Status: {status} | Total: {total}")
         
-        # Message en attente
         if status == 'pending':
             pending_finalization[game_number] = {
                 'message_text': message_text,
@@ -374,7 +401,6 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
             }
             return
         
-        # Message finalisé
         if status == 'finalized':
             if game_number in pending_finalization:
                 del pending_finalization[game_number]
@@ -387,32 +413,26 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
             
             is_even_result = is_even(total)
             
-            # Incrémentation des compteurs globaux
             if is_even_result:
                 total_even_count += 1
             else:
                 total_odd_count += 1
             
-            # Ajouter à l'historique (fenêtre glissante)
             games_history[game_number] = {
                 'total': total,
                 'is_even': is_even_result,
                 'timestamp': datetime.now().isoformat()
             }
             
-            # Garder uniquement les 20 derniers
             if len(games_history) > GAMES_FOR_ANALYSIS:
                 oldest = min(games_history.keys())
                 del games_history[oldest]
             
-            # Recalculer écarts en temps réel
             if len(games_history) >= GAMES_FOR_ANALYSIS:
                 calculate_gap_stats_from_window()
             
-            # Vérifier prédictions
             await check_prediction_result(game_number, total, is_even_result)
             
-            # Nouvelle prédiction ?
             should_pred, prediction_type = should_predict()
             
             if should_pred and prediction_type:
@@ -468,6 +488,9 @@ async def cmd_start(event):
         "Commandes:\n"
         "`/status` - État\n"
         "`/info` - Canaux\n"
+        "`/channels` - Liste des canaux\n"
+        "`/addchannel <id>` - Ajouter un canal\n"
+        "`/removechannel <id>` - Retirer un canal\n"
         "`/histo` - Historique 20 jeux\n"
         "`/setmode auto/manual`\n"
         "`/setgap pair/impair <n>`\n"
@@ -484,8 +507,6 @@ async def cmd_status(event):
     
     calculate_current_streaks()
     
-    channels_str = ', '.join([str(c) for c in PREDICTION_CHANNEL_IDS if c])
-    
     msg = (
         f"📊 **État**\n"
         f"🎮 Dernier: #{last_game_number}\n"
@@ -493,7 +514,7 @@ async def cmd_status(event):
         f"🔥 Séries: P={current_even_streak} I={current_odd_streak}\n"
         f"⚙️ Mode: {'Auto' if auto_mode else 'Manuel'}\n"
         f"📊 Écarts: P={auto_even_gap} I={auto_odd_gap}\n"
-        f"📡 Canaux: {channels_str}\n"
+        f"📡 Canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}\n"
         f"🔮 En cours: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}\n"
         f"✅ {total_predictions_won} | ❌ {total_predictions_lost}"
     )
@@ -506,17 +527,162 @@ async def cmd_info(event):
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
         return
     
-    channels_str = '\n'.join([f"• `{c}`" for c in PREDICTION_CHANNEL_IDS if c])
+    channels_str = '\n'.join([f"• `{c}`" for c in DYNAMIC_PREDICTION_CHANNELS])
     
     msg = (
         f"ℹ️ **Info**\n"
         f"📡 Source: `{SOURCE_CHANNEL_ID}`\n"
-        f"📡 Prédictions:\n{channels_str}\n"
+        f"📡 Prédictions ({len(DYNAMIC_PREDICTION_CHANNELS)}):\n{channels_str}\n"
         f"🎮 Dernier: `{last_game_number}`\n"
         f"⏳ En attente: {len(pending_finalization)}\n"
         f"🔮 Actives: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}"
     )
     await event.respond(msg)
+
+@client.on(events.NewMessage(pattern='/channels'))
+async def cmd_channels(event):
+    """Liste tous les canaux de prédiction."""
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Admin uniquement")
+        return
+    
+    if not DYNAMIC_PREDICTION_CHANNELS:
+        await event.respond("📭 Aucun canal configuré")
+        return
+    
+    lines = [f"📡 **Canaux de prédiction ({len(DYNAMIC_PREDICTION_CHANNELS)}/20)**\n"]
+    
+    for i, channel_id in enumerate(DYNAMIC_PREDICTION_CHANNELS, 1):
+        # Vérifier si le canal est accessible
+        status = "❓"
+        try:
+            # Tentative de récupération des infos du canal
+            entity = await client.get_entity(channel_id)
+            status = "✅"
+            title = getattr(entity, 'title', 'Inconnu')
+            lines.append(f"{i}. `{channel_id}` {status} {title}")
+        except:
+            lines.append(f"{i}. `{channel_id}` {status} (inaccessible)")
+    
+    lines.append(f"\n💡 Utilisez `/addchannel <id>` pour ajouter")
+    lines.append(f"💡 Utilisez `/removechannel <id>` pour retirer")
+    
+    await event.respond("\n".join(lines))
+
+@client.on(events.NewMessage(pattern='/addchannel'))
+async def cmd_addchannel(event):
+    """Ajoute un canal de prédition dynamiquement."""
+    global DYNAMIC_PREDICTION_CHANNELS
+    
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Admin uniquement")
+        return
+    
+    parts = event.message.message.split()
+    if len(parts) < 2:
+        await event.respond(
+            "❌ Usage: `/addchannel <id>`\n\n"
+            "Exemples:\n"
+            "`/addchannel -1001234567890`\n"
+            "`/addchannel -1003725380926`"
+        )
+        return
+    
+    try:
+        new_channel_id = int(parts[1])
+        
+        # Vérifier si déjà présent
+        if new_channel_id in DYNAMIC_PREDICTION_CHANNELS:
+            await event.respond(f"⚠️ Canal `{new_channel_id}` déjà dans la liste")
+            return
+        
+        # Vérifier limite de 20 canaux
+        if len(DYNAMIC_PREDICTION_CHANNELS) >= 20:
+            await event.respond(f"❌ Limite de 20 canaux atteinte\nRetirez un canal avant d'ajouter")
+            return
+        
+        # Vérifier que le canal est accessible
+        try:
+            entity = await client.get_entity(new_channel_id)
+            title = getattr(entity, 'title', 'Inconnu')
+        except Exception as e:
+            await event.respond(
+                f"⚠️ Canal `{new_channel_id}` inaccessible\n"
+                f"Erreur: {str(e)[:50]}\n"
+                f"Le bot doit être membre du canal."
+            )
+            # On ajoute quand même, mais on prévient
+            title = "Inaccessible"
+        
+        # Ajouter le canal
+        DYNAMIC_PREDICTION_CHANNELS.append(new_channel_id)
+        save_dynamic_channels()
+        
+        await event.respond(
+            f"✅ Canal ajouté!\n\n"
+            f"🆔 ID: `{new_channel_id}`\n"
+            f"📛 Nom: {title}\n"
+            f"📊 Total canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}/20\n\n"
+            f"🔮 Les prochaines prédictions seront envoyées ici automatiquement!"
+        )
+        
+        # Tester l'envoi
+        try:
+            await client.send_message(
+                new_channel_id, 
+                "🤖 *Bot de Prédiction connecté*\n"
+                "Les prédictions seront envoyées ici automatiquement.",
+                parse_mode='markdown'
+            )
+        except Exception as e:
+            await event.respond(f"⚠️ Test échoué: {str(e)[:100]}")
+        
+    except ValueError:
+        await event.respond("❌ ID invalide. Utilisez un nombre entier (ex: -1001234567890)")
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {str(e)[:100]}")
+
+@client.on(events.NewMessage(pattern='/removechannel'))
+async def cmd_removechannel(event):
+    """Retire un canal de prédiction."""
+    global DYNAMIC_PREDICTION_CHANNELS
+    
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Admin uniquement")
+        return
+    
+    parts = event.message.message.split()
+    if len(parts) < 2:
+        await event.respond("❌ Usage: `/removechannel <id>`")
+        return
+    
+    try:
+        channel_id_to_remove = int(parts[1])
+        
+        if channel_id_to_remove not in DYNAMIC_PREDICTION_CHANNELS:
+            await event.respond(f"⚠️ Canal `{channel_id_to_remove}` non trouvé")
+            return
+        
+        DYNAMIC_PREDICTION_CHANNELS.remove(channel_id_to_remove)
+        save_dynamic_channels()
+        
+        await event.respond(
+            f"✅ Canal retiré!\n\n"
+            f"🆔 ID: `{channel_id_to_remove}`\n"
+            f"📊 Total canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}\n\n"
+            f"❌ Plus de prédictions ne seront envoyées à ce canal."
+        )
+        
+    except ValueError:
+        await event.respond("❌ ID invalide")
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {str(e)[:100]}")
 
 @client.on(events.NewMessage(pattern='/histo'))
 async def cmd_histo(event):
@@ -703,6 +869,7 @@ async def index(request):
             <p>Dernier: #{last_game_number}</p>
             <p>Mode: {'Auto' if auto_mode else 'Manuel'}</p>
             <p>Écarts: P={auto_even_gap} I={auto_odd_gap}</p>
+            <p>Canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}</p>
             <p>Actives: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}</p>
         </div>
     </body>
@@ -726,12 +893,15 @@ async def start_web_server():
 # --- Démarrage ---
 
 async def start_bot():
-    global source_channel_ok, prediction_channels_ok
+    global source_channel_ok, DYNAMIC_PREDICTION_CHANNELS
+    
+    # Charger les canaux sauvegardés au démarrage
+    load_dynamic_channels()
+    
     try:
         await client.start(bot_token=BOT_TOKEN)
         source_channel_ok = True
-        prediction_channels_ok = [c for c in PREDICTION_CHANNEL_IDS if c]
-        logger.info("✅ Bot connecté")
+        logger.info(f"✅ Bot connecté | {len(DYNAMIC_PREDICTION_CHANNELS)} canaux actifs")
         return True
     except Exception as e:
         logger.error(f"❌ Erreur: {e}")
