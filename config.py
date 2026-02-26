@@ -1,30 +1,32 @@
 """
 Configuration du bot Telegram de prédiction Pair/Impair
 """
-import os
 
-def parse_channel_id(env_var: str, default: str) -> int:
-    value = os.getenv(env_var) or default
-    channel_id = int(value)
-    # Convertit l'ID positif en format ID de canal Telegram négatif si nécessaire
-    if channel_id > 0 and len(str(channel_id)) >= 10:
-        channel_id = -channel_id
-    return channel_id
+# ============================================
+# IDENTIFIANTS TELEGRAM (ESSENTIELS)
+# ============================================
 
-# ID du canal source (où les résultats arrivent)
-SOURCE_CHANNEL_ID = parse_channel_id('SOURCE_CHANNEL_ID', '-1002682552255')
+API_ID = 29177661
+API_HASH = 'a8639172fa8d35dbfd8ea46286d349ab'
+BOT_TOKEN = '7749786995:AAGr9rk_uuykLLp5g7Hi3XwIlsdMfW9pWFw'
+ADMIN_ID = 1190237801
 
-# ID DU CANAL DE PRÉDICTION
-PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-1003725380926')
+# ============================================
+# CONFIGURATION DES CANAUX
+# ============================================
 
-ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
+SOURCE_CHANNEL_ID = -1002682552255
+PREDICTION_CHANNEL_ID = -1003725380926
 
-API_ID = int(os.getenv('API_ID') or '0')
-API_HASH = os.getenv('API_HASH') or ''
-BOT_TOKEN = os.getenv('BOT_TOKEN') or '7749786995:AAGr9rk_uuykLLp5g7Hi3XwIlsdMfW9pWFw'
+# ============================================
+# CONFIGURATION SERVEUR
+# ============================================
 
-PORT = int(os.getenv('PORT') or '10000')
+PORT = 10000
 
-# Paramètres de prédiction Pair/Impair
-DEFAULT_AUTO_CHECK_INTERVAL = 20  # Vérification auto tous les 20 jeux
-MAX_HISTORY_SIZE = 100  # Taille maximale de l'historique des jeux
+# ============================================
+# PARAMÈTRES DE PRÉDICTION PAIR/IMPAIR
+# ============================================
+
+DEFAULT_AUTO_CHECK_INTERVAL = 20
+MAX_HISTORY_SIZE = 100
