@@ -47,12 +47,15 @@ pending_predictions = {}
 current_even_streak = 0
 current_odd_streak = 0
 
-max_even_gap = 3
-max_odd_gap = 3
-auto_mode = True
+# Écarts en mode manuel (définis par admin)
+manual_even_gap = 3
+manual_odd_gap = 3
 
+# Écarts en mode auto (calculés par le bot)
 auto_even_gap = 3
 auto_odd_gap = 3
+
+auto_mode = True
 
 last_game_number = 0
 last_total = 0
@@ -65,8 +68,7 @@ total_predictions_lost = 0
 
 source_channel_ok = False
 
-# Liste dynamique des canaux de prédiction (modifiable à la volée)
-DYNAMIC_PREDICTION_CHANNELS = list(PREDICTION_CHANNEL_IDS) if isinstance(PREDICTION_CHANNEL_IDS, list) else [PREDICTION_CHANNEL_IDS]
+DYNAMIC_PREDICTION_CHANNELS = []
 
 PREDICTION_WINDOW = 3
 PREDICTION_TIMEOUT_MINUTES = 20
@@ -74,13 +76,11 @@ PREDICTION_TIMEOUT_MINUTES = 20
 initial_analysis_done = False
 GAMES_FOR_ANALYSIS = 20
 
-# Fichier de sauvegarde des canaux
 CHANNELS_FILE = 'dynamic_channels.json'
 
 # --- Fonctions Utilitaires ---
 
 def load_dynamic_channels():
-    """Charge les canaux dynamiques depuis le fichier."""
     global DYNAMIC_PREDICTION_CHANNELS
     try:
         if os.path.exists(CHANNELS_FILE):
@@ -88,28 +88,25 @@ def load_dynamic_channels():
                 loaded = json.load(f)
                 if loaded:
                     DYNAMIC_PREDICTION_CHANNELS = loaded
-                    logger.info(f"📂 Canaux chargés: {len(DYNAMIC_PREDICTION_CHANNELS)} canaux")
+                    logger.info(f"📂 Canaux chargés: {len(DYNAMIC_PREDICTION_CHANNELS)}")
     except Exception as e:
         logger.error(f"Erreur chargement canaux: {e}")
 
 def save_dynamic_channels():
-    """Sauvegarde les canaux dynamiques dans le fichier."""
     try:
         with open(CHANNELS_FILE, 'w') as f:
             json.dump(DYNAMIC_PREDICTION_CHANNELS, f)
-        logger.info(f"💾 Canaux sauvegardés: {len(DYNAMIC_PREDICTION_CHANNELS)} canaux")
+        logger.info(f"💾 Canaux sauvegardés: {len(DYNAMIC_PREDICTION_CHANNELS)}")
     except Exception as e:
         logger.error(f"Erreur sauvegarde canaux: {e}")
 
 def extract_game_number(message: str):
-    """Extrait le numéro de jeu (#N1074 ou #N 1074)."""
     match = re.search(r"#N\s*(\d+)", message, re.IGNORECASE)
     if match:
         return int(match.group(1))
     return None
 
 def extract_total_value(message: str):
-    """Extrait #T avant #R."""
     match = re.search(r"#T\s*(\d+)", message, re.IGNORECASE)
     if match:
         return int(match.group(1))
@@ -131,14 +128,19 @@ def get_message_status(message: str) -> str:
         return 'pending'
     return 'unknown'
 
-# --- Analyse des Écarts (Fenêtre Glissante 20 Jeux) ---
+# --- Analyse des Écarts ---
 
 def calculate_gap_stats_from_window():
     """
-    Calcule les écarts max sur les 20 derniers jeux uniquement.
-    Écart = nombre de positions entre deux résultats identiques.
+    Calcule les écarts max sur les 20 derniers jeux.
+    Ne fonctionne qu'en mode AUTO.
     """
     global auto_even_gap, auto_odd_gap, initial_analysis_done
+    
+    # Ne recalcule PAS en mode manuel
+    if not auto_mode:
+        logger.info("👤 Mode manuel actif - Pas de recalcul auto des écarts")
+        return False
     
     if len(games_history) < GAMES_FOR_ANALYSIS:
         return False
@@ -177,12 +179,11 @@ def calculate_gap_stats_from_window():
     initial_analysis_done = True
     
     if old_even_gap != auto_even_gap or old_odd_gap != auto_odd_gap:
-        logger.info(f"📊 Écarts mis à jour - PAIR: {old_even_gap}→{auto_even_gap}, IMPAIR: {old_odd_gap}→{auto_odd_gap}")
+        logger.info(f"📊 Écarts AUTO mis à jour - P:{old_even_gap}→{auto_even_gap}, I:{old_odd_gap}→{auto_odd_gap}")
     
     return True
 
 def calculate_current_streaks():
-    """Calcule les séries actuelles sur les jeux historisés."""
     global current_even_streak, current_odd_streak
     
     if not games_history:
@@ -211,19 +212,31 @@ def calculate_current_streaks():
 
 # --- Logique de Prédiction ---
 
+def get_current_thresholds():
+    """
+    Retourne les seuils actuels selon le mode.
+    Mode AUTO: utilise auto_even_gap/auto_odd_gap
+    Mode MANUEL: utilise manual_even_gap/manual_odd_gap
+    """
+    if auto_mode:
+        return auto_even_gap, auto_odd_gap
+    else:
+        return manual_even_gap, manual_odd_gap
+
 def should_predict() -> tuple:
-    """
-    Détermine si une prédiction doit être faite.
-    Seuil = écart_max - 1
-    """
     global initial_analysis_done
     
     if len(games_history) < GAMES_FOR_ANALYSIS:
         return (False, None)
     
-    if not initial_analysis_done:
+    # En mode auto, faire l'analyse si pas encore faite
+    if auto_mode and not initial_analysis_done:
         if not calculate_gap_stats_from_window():
             return (False, None)
+    
+    # En mode manuel, pas besoin d'analyse auto
+    if not auto_mode:
+        initial_analysis_done = True  # Considère comme "prêt"
     
     active_predictions = [p for p in pending_predictions.values() if p['status'] == '🔮']
     if active_predictions:
@@ -231,8 +244,12 @@ def should_predict() -> tuple:
     
     calculate_current_streaks()
     
-    even_threshold = auto_even_gap if auto_mode else max_even_gap
-    odd_threshold = auto_odd_gap if auto_mode else max_odd_gap
+    # Utilise les seuils selon le mode
+    even_threshold, odd_threshold = get_current_thresholds()
+    
+    logger.info(f"{'🤖' if auto_mode else '👤'} Mode {'AUTO' if auto_mode else 'MANUEL'} - "
+                f"Seuils: P={even_threshold}, I={odd_threshold} | "
+                f"Séries: P={current_even_streak}, I={current_odd_streak}")
     
     if current_even_streak >= (even_threshold - 1) and current_even_streak > 0:
         return (True, "IMPAIR")
@@ -243,8 +260,7 @@ def should_predict() -> tuple:
     return (False, None)
 
 async def send_prediction_to_channels(target_game: int, prediction: str):
-    """Envoie la prédiction vers TOUS les canaux configurés (dynamiques inclus)."""
-    global total_predictions_made, DYNAMIC_PREDICTION_CHANNELS
+    global total_predictions_made
     
     try:
         emoji = "🔵" if prediction == "PAIR" else "🔴"
@@ -252,7 +268,6 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         message_ids = {}
         
-        # Envoyer à tous les canaux dynamiques
         for channel_id in DYNAMIC_PREDICTION_CHANNELS:
             if channel_id and channel_id != 0:
                 try:
@@ -277,11 +292,13 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         
         total_predictions_made += 1
         
+        even_thr, odd_thr = get_current_thresholds()
         channels_str = ', '.join([str(c) for c in message_ids.keys() if message_ids[c] != 0])
+        
         await notify_admin(f"🔮 Nouvelle prédiction: Jeu #{target_game} = {prediction}\n"
-                          f"📡 Canaux ({len(DYNAMIC_PREDICTION_CHANNELS)}): {channels_str}\n"
-                          f"📊 Séries: P={current_even_streak}/I={current_odd_streak}\n"
-                          f"📈 Seuils: P={auto_even_gap}/I={auto_odd_gap}")
+                          f"{'🤖' if auto_mode else '👤'} Mode: {'AUTO' if auto_mode else 'MANUEL'}\n"
+                          f"📊 Seuils: P={even_thr}/I={odd_thr}\n"
+                          f"📡 Canaux: {channels_str}")
         
         return message_ids
         
@@ -290,7 +307,6 @@ async def send_prediction_to_channels(target_game: int, prediction: str):
         return {}
 
 async def update_prediction_status(game_number: int, new_status: str, won_at_offset: int = None):
-    """Met à jour le statut sur TOUS les canaux."""
     global total_predictions_won, total_predictions_lost
     
     try:
@@ -327,13 +343,11 @@ async def update_prediction_status(game_number: int, new_status: str, won_at_off
         if new_status.startswith('✅'):
             total_predictions_won += 1
             del pending_predictions[game_number]
-            await notify_admin(f"✅ Prédiction #{game_number} GAGNÉE {status_text}\n"
-                              f"📡 Canaux: {', '.join(updated_channels)}")
+            await notify_admin(f"✅ Prédiction #{game_number} GAGNÉE {status_text}")
         elif new_status == '❌':
             total_predictions_lost += 1
             del pending_predictions[game_number]
-            await notify_admin(f"❌ Prédiction #{game_number} PERDUE\n"
-                              f"📡 Canaux: {', '.join(updated_channels)}")
+            await notify_admin(f"❌ Prédiction #{game_number} PERDUE")
         
         return True
         
@@ -342,7 +356,6 @@ async def update_prediction_status(game_number: int, new_status: str, won_at_off
         return False
 
 async def check_prediction_result(game_number: int, total: int, is_even: bool):
-    """Vérifie si prédiction gagnée."""
     for pred_game_num, pred_data in list(pending_predictions.items()):
         if pred_data['status'] != '🔮':
             continue
@@ -369,7 +382,6 @@ async def check_prediction_result(game_number: int, total: int, is_even: bool):
                     await update_prediction_status(pred_game_num, '❌', None)
 
 async def notify_admin(message: str):
-    """Envoie une notification à l'admin."""
     try:
         if ADMIN_ID and ADMIN_ID != 0:
             await client.send_message(ADMIN_ID, f"🤖 *Bot Notification*\n\n{message}", parse_mode='markdown')
@@ -379,7 +391,6 @@ async def notify_admin(message: str):
 # --- Traitement des Messages ---
 
 async def process_message(message_text: str, chat_id: int, is_edit: bool = False):
-    """Traite un message."""
     global last_game_number, last_total, total_even_count, total_odd_count
     global current_even_streak, current_odd_streak, initial_analysis_done
     global games_history, pending_finalization
@@ -428,7 +439,8 @@ async def process_message(message_text: str, chat_id: int, is_edit: bool = False
                 oldest = min(games_history.keys())
                 del games_history[oldest]
             
-            if len(games_history) >= GAMES_FOR_ANALYSIS:
+            # Recalcul auto seulement en mode auto
+            if auto_mode and len(games_history) >= GAMES_FOR_ANALYSIS:
                 calculate_gap_stats_from_window()
             
             await check_prediction_result(game_number, total, is_even_result)
@@ -487,15 +499,15 @@ async def cmd_start(event):
         "🤖 **Bot Prédiction Pair/Impair**\n\n"
         "Commandes:\n"
         "`/status` - État\n"
-        "`/info` - Canaux\n"
-        "`/channels` - Liste des canaux\n"
-        "`/addchannel <id>` - Ajouter un canal\n"
-        "`/removechannel <id>` - Retirer un canal\n"
-        "`/histo` - Historique 20 jeux\n"
-        "`/setmode auto/manual`\n"
-        "`/setgap pair/impair <n>`\n"
+        "`/info` - Canaux et config\n"
+        "`/channels` - Liste canaux\n"
+        "`/addchannel <id>` - Ajouter canal\n"
+        "`/removechannel <id>` - Retirer canal\n"
+        "`/histo` - Historique\n"
+        "`/setmode auto/manual` - Mode\n"
+        "`/setgap pair/impair <n>` - Écarts manuels\n"
         "`/stats` - Statistiques\n"
-        "`/reset` - Reset manuel"
+        "`/reset` - Reset"
     )
 
 @client.on(events.NewMessage(pattern='/status'))
@@ -506,18 +518,27 @@ async def cmd_status(event):
         return
     
     calculate_current_streaks()
+    even_thr, odd_thr = get_current_thresholds()
     
     msg = (
         f"📊 **État**\n"
         f"🎮 Dernier: #{last_game_number}\n"
         f"📈 P:{total_even_count} I:{total_odd_count}\n"
         f"🔥 Séries: P={current_even_streak} I={current_odd_streak}\n"
-        f"⚙️ Mode: {'Auto' if auto_mode else 'Manuel'}\n"
-        f"📊 Écarts: P={auto_even_gap} I={auto_odd_gap}\n"
-        f"📡 Canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}\n"
-        f"🔮 En cours: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}\n"
-        f"✅ {total_predictions_won} | ❌ {total_predictions_lost}"
+        f"⚙️ Mode: {'🤖 AUTO' if auto_mode else '👤 MANUEL'}\n"
+        f"📊 Seuils actifs: P={even_thr} I={odd_thr}\n"
     )
+    
+    # Afficher les deux types de seuils pour info
+    if auto_mode:
+        msg += f"📈 (Manuels: P={manual_even_gap} I={manual_odd_gap})\n"
+    else:
+        msg += f"📈 (Auto: P={auto_even_gap} I={auto_odd_gap})\n"
+    
+    msg += (f"📡 Canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}\n"
+            f"🔮 En cours: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}\n"
+            f"✅ {total_predictions_won} | ❌ {total_predictions_lost}")
+    
     await event.respond(msg)
 
 @client.on(events.NewMessage(pattern='/info'))
@@ -527,21 +548,23 @@ async def cmd_info(event):
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
         return
     
+    even_thr, odd_thr = get_current_thresholds()
+    
     channels_str = '\n'.join([f"• `{c}`" for c in DYNAMIC_PREDICTION_CHANNELS])
     
     msg = (
-        f"ℹ️ **Info**\n"
+        f"ℹ️ **Configuration**\n"
         f"📡 Source: `{SOURCE_CHANNEL_ID}`\n"
-        f"📡 Prédictions ({len(DYNAMIC_PREDICTION_CHANNELS)}):\n{channels_str}\n"
+        f"📡 Prédictions ({len(DYNAMIC_PREDICTION_CHANNELS)}):\n{channels_str}\n\n"
+        f"⚙️ Mode: {'🤖 AUTO' if auto_mode else '👤 MANUEL'}\n"
+        f"📊 Seuils actifs: P={even_thr} I={odd_thr}\n"
         f"🎮 Dernier: `{last_game_number}`\n"
-        f"⏳ En attente: {len(pending_finalization)}\n"
-        f"🔮 Actives: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}"
+        f"⏳ En attente: {len(pending_finalization)}"
     )
     await event.respond(msg)
 
 @client.on(events.NewMessage(pattern='/channels'))
 async def cmd_channels(event):
-    """Liste tous les canaux de prédiction."""
     if event.is_group or event.is_channel:
         return
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
@@ -549,16 +572,14 @@ async def cmd_channels(event):
         return
     
     if not DYNAMIC_PREDICTION_CHANNELS:
-        await event.respond("📭 Aucun canal configuré")
+        await event.respond("📭 Aucun canal")
         return
     
-    lines = [f"📡 **Canaux de prédiction ({len(DYNAMIC_PREDICTION_CHANNELS)}/20)**\n"]
+    lines = [f"📡 **Canaux ({len(DYNAMIC_PREDICTION_CHANNELS)}/20)**\n"]
     
     for i, channel_id in enumerate(DYNAMIC_PREDICTION_CHANNELS, 1):
-        # Vérifier si le canal est accessible
         status = "❓"
         try:
-            # Tentative de récupération des infos du canal
             entity = await client.get_entity(channel_id)
             status = "✅"
             title = getattr(entity, 'title', 'Inconnu')
@@ -566,14 +587,10 @@ async def cmd_channels(event):
         except:
             lines.append(f"{i}. `{channel_id}` {status} (inaccessible)")
     
-    lines.append(f"\n💡 Utilisez `/addchannel <id>` pour ajouter")
-    lines.append(f"💡 Utilisez `/removechannel <id>` pour retirer")
-    
     await event.respond("\n".join(lines))
 
 @client.on(events.NewMessage(pattern='/addchannel'))
 async def cmd_addchannel(event):
-    """Ajoute un canal de prédition dynamiquement."""
     global DYNAMIC_PREDICTION_CHANNELS
     
     if event.is_group or event.is_channel:
@@ -584,71 +601,50 @@ async def cmd_addchannel(event):
     
     parts = event.message.message.split()
     if len(parts) < 2:
-        await event.respond(
-            "❌ Usage: `/addchannel <id>`\n\n"
-            "Exemples:\n"
-            "`/addchannel -1001234567890`\n"
-            "`/addchannel -1003725380926`"
-        )
+        await event.respond("❌ Usage: `/addchannel <id>`")
         return
     
     try:
         new_channel_id = int(parts[1])
         
-        # Vérifier si déjà présent
         if new_channel_id in DYNAMIC_PREDICTION_CHANNELS:
-            await event.respond(f"⚠️ Canal `{new_channel_id}` déjà dans la liste")
+            await event.respond(f"⚠️ Déjà présent")
             return
         
-        # Vérifier limite de 20 canaux
         if len(DYNAMIC_PREDICTION_CHANNELS) >= 20:
-            await event.respond(f"❌ Limite de 20 canaux atteinte\nRetirez un canal avant d'ajouter")
+            await event.respond(f"❌ Limite 20 atteinte")
             return
         
-        # Vérifier que le canal est accessible
         try:
             entity = await client.get_entity(new_channel_id)
             title = getattr(entity, 'title', 'Inconnu')
         except Exception as e:
-            await event.respond(
-                f"⚠️ Canal `{new_channel_id}` inaccessible\n"
-                f"Erreur: {str(e)[:50]}\n"
-                f"Le bot doit être membre du canal."
-            )
-            # On ajoute quand même, mais on prévient
             title = "Inaccessible"
         
-        # Ajouter le canal
         DYNAMIC_PREDICTION_CHANNELS.append(new_channel_id)
         save_dynamic_channels()
         
         await event.respond(
-            f"✅ Canal ajouté!\n\n"
-            f"🆔 ID: `{new_channel_id}`\n"
-            f"📛 Nom: {title}\n"
-            f"📊 Total canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}/20\n\n"
-            f"🔮 Les prochaines prédictions seront envoyées ici automatiquement!"
+            f"✅ Canal ajouté!\n"
+            f"🆔 `{new_channel_id}`\n"
+            f"📛 {title}\n"
+            f"📊 Total: {len(DYNAMIC_PREDICTION_CHANNELS)}/20"
         )
         
-        # Tester l'envoi
         try:
-            await client.send_message(
-                new_channel_id, 
-                "🤖 *Bot de Prédiction connecté*\n"
-                "Les prédictions seront envoyées ici automatiquement.",
-                parse_mode='markdown'
-            )
-        except Exception as e:
-            await event.respond(f"⚠️ Test échoué: {str(e)[:100]}")
+            await client.send_message(new_channel_id, 
+                "🤖 *Bot connecté* - Prédictions automatiques activées",
+                parse_mode='markdown')
+        except:
+            pass
         
     except ValueError:
-        await event.respond("❌ ID invalide. Utilisez un nombre entier (ex: -1001234567890)")
+        await event.respond("❌ ID invalide")
     except Exception as e:
         await event.respond(f"❌ Erreur: {str(e)[:100]}")
 
 @client.on(events.NewMessage(pattern='/removechannel'))
 async def cmd_removechannel(event):
-    """Retire un canal de prédiction."""
     global DYNAMIC_PREDICTION_CHANNELS
     
     if event.is_group or event.is_channel:
@@ -666,17 +662,16 @@ async def cmd_removechannel(event):
         channel_id_to_remove = int(parts[1])
         
         if channel_id_to_remove not in DYNAMIC_PREDICTION_CHANNELS:
-            await event.respond(f"⚠️ Canal `{channel_id_to_remove}` non trouvé")
+            await event.respond(f"⚠️ Non trouvé")
             return
         
         DYNAMIC_PREDICTION_CHANNELS.remove(channel_id_to_remove)
         save_dynamic_channels()
         
         await event.respond(
-            f"✅ Canal retiré!\n\n"
-            f"🆔 ID: `{channel_id_to_remove}`\n"
-            f"📊 Total canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}\n\n"
-            f"❌ Plus de prédictions ne seront envoyées à ce canal."
+            f"✅ Canal retiré!\n"
+            f"🆔 `{channel_id_to_remove}`\n"
+            f"📊 Total: {len(DYNAMIC_PREDICTION_CHANNELS)}"
         )
         
     except ValueError:
@@ -708,55 +703,99 @@ async def cmd_histo(event):
     even_gaps = [even_pos[i]-even_pos[i-1] for i in range(1, len(even_pos))] if len(even_pos) > 1 else []
     odd_gaps = [odd_pos[i]-odd_pos[i-1] for i in range(1, len(odd_pos))] if len(odd_pos) > 1 else []
     
-    lines.append(f"\n📊 Écarts max: 🔵{max(even_gaps) if even_gaps else 0} 🔴{max(odd_gaps) if odd_gaps else 0}")
-    lines.append(f"🤖 Seuils: 🔵{auto_even_gap} 🔴{auto_odd_gap}")
+    even_max = max(even_gaps) if even_gaps else 0
+    odd_max = max(odd_gaps) if odd_gaps else 0
+    
+    even_thr, odd_thr = get_current_thresholds()
+    
+    lines.append(f"\n📊 Écarts observés: 🔵{even_max} 🔴{odd_max}")
+    lines.append(f"{'🤖' if auto_mode else '👤'} Seuils actifs: 🔵{even_thr} 🔴{odd_thr}")
     
     await event.respond("\n".join(lines))
 
 @client.on(events.NewMessage(pattern='/setmode'))
 async def cmd_setmode(event):
-    global auto_mode
+    global auto_mode, initial_analysis_done
+    
     if event.is_group or event.is_channel:
         return
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Admin uniquement")
         return
     
     parts = event.message.message.split()
     if len(parts) < 2:
-        await event.respond("Usage: `/setmode auto` ou `manual`")
+        await event.respond("Usage: `/setmode auto` ou `/setmode manual`")
         return
     
-    if parts[1].lower() == 'auto':
+    mode = parts[1].lower()
+    
+    if mode == 'auto':
         auto_mode = True
+        initial_analysis_done = False  # Force recalcul
         calculate_gap_stats_from_window()
-        await event.respond(f"✅ Auto | Écarts: P={auto_even_gap} I={auto_odd_gap}")
-    elif parts[1].lower() == 'manual':
+        await event.respond(
+            f"✅ Mode **AUTO** activé\n"
+            f"📊 Écarts calculés: P={auto_even_gap} I={auto_odd_gap}\n"
+            f"🤖 Le bot calcule automatiquement les écarts"
+        )
+        
+    elif mode == 'manual':
         auto_mode = False
-        await event.respond(f"✅ Manuel | Écarts: P={max_even_gap} I={max_odd_gap}")
+        initial_analysis_done = True  # Prêt immédiatement
+        await event.respond(
+            f"✅ Mode **MANUEL** activé\n"
+            f"📊 Écarts manuels: P={manual_even_gap} I={manual_odd_gap}\n"
+            f"👤 Utilisez `/setgap pair <n>` et `/setgap impair <n>`\n"
+            f"❌ Le bot NE calcule PLUS automatiquement les écarts"
+        )
+    else:
+        await event.respond("❌ Mode invalide. Utilisez `auto` ou `manual`")
 
 @client.on(events.NewMessage(pattern='/setgap'))
 async def cmd_setgap(event):
-    global max_even_gap, max_odd_gap
+    global manual_even_gap, manual_odd_gap
+    
     if event.is_group or event.is_channel:
         return
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("⛔ Admin uniquement")
         return
     
     parts = event.message.message.split()
     if len(parts) < 3:
-        await event.respond("Usage: `/setgap pair 4`")
+        await event.respond("Usage: `/setgap pair <n>` ou `/setgap impair <n>`")
         return
     
+    gap_type = parts[1].lower()
     try:
-        val = int(parts[2])
-        if parts[1].lower() == 'pair':
-            max_even_gap = val
-            await event.respond(f"✅ Écart PAIR: {val}")
-        elif parts[1].lower() == 'impair':
-            max_odd_gap = val
-            await event.respond(f"✅ Écart IMPAIR: {val}")
-    except:
-        await event.respond("❌ Valeur invalide")
+        gap_value = int(parts[2])
+        if gap_value < 2 or gap_value > 10:
+            await event.respond("❌ Entre 2 et 10")
+            return
+    except ValueError:
+        await event.respond("❌ Nombre invalide")
+        return
+    
+    if gap_type == 'pair':
+        manual_even_gap = gap_value
+        msg = f"✅ Écart PAIR manuel: **{gap_value}**"
+        if auto_mode:
+            msg += f"\n⚠️ Mode AUTO actif - Passez en manuel: `/setmode manual`"
+        else:
+            msg += f"\n👤 Mode MANUEL - Seuil actif: {gap_value - 1} consécutifs"
+        await event.respond(msg)
+        
+    elif gap_type == 'impair':
+        manual_odd_gap = gap_value
+        msg = f"✅ Écart IMPAIR manuel: **{gap_value}**"
+        if auto_mode:
+            msg += f"\n⚠️ Mode AUTO actif - Passez en manuel: `/setmode manual`"
+        else:
+            msg += f"\n👤 Mode MANUEL - Seuil actif: {gap_value - 1} consécutifs"
+        await event.respond(msg)
+    else:
+        await event.respond("❌ Type invalide. Utilisez `pair` ou `impair`")
 
 @client.on(events.NewMessage(pattern='/stats'))
 async def cmd_stats(event):
@@ -767,13 +806,19 @@ async def cmd_stats(event):
     
     win_rate = (total_predictions_won / total_predictions_made * 100) if total_predictions_made > 0 else 0
     
+    even_thr, odd_thr = get_current_thresholds()
+    
     msg = (
-        f"📈 **Stats**\n"
-        f"Jeux: {len(games_history)}\n"
-        f"🔵 P:{total_even_count} 🔴 I:{total_odd_count}\n"
-        f"🔮 Total: {total_predictions_made}\n"
-        f"✅ {total_predictions_won} | ❌ {total_predictions_lost}\n"
-        f"📊 Taux: {win_rate:.1f}%"
+        f"📈 **Statistiques**\n\n"
+        f"🎮 Jeux analysés: {len(games_history)}\n"
+        f"🔵 Pairs: {total_even_count} | 🔴 Impairs: {total_odd_count}\n\n"
+        f"⚙️ Mode: {'🤖 AUTO' if auto_mode else '👤 MANUEL'}\n"
+        f"📊 Seuils actifs: P={even_thr} I={odd_thr}\n\n"
+        f"🔮 Prédictions:\n"
+        f"• Total: {total_predictions_made}\n"
+        f"• ✅ Gagnées: {total_predictions_won}\n"
+        f"• ❌ Perdues: {total_predictions_lost}\n"
+        f"• 📊 Taux: {win_rate:.1f}%"
     )
     await event.respond(msg)
 
@@ -790,7 +835,6 @@ async def cmd_reset(event):
 # --- Tâches Automatiques ---
 
 async def perform_reset(reason: str = "Automatique"):
-    """Effectue le reset complet."""
     global games_history, pending_predictions, pending_finalization
     global current_even_streak, current_odd_streak, initial_analysis_done
     global total_even_count, total_odd_count, total_predictions_made
@@ -807,11 +851,10 @@ async def perform_reset(reason: str = "Automatique"):
     last_game_number = last_total = 0
     initial_analysis_done = False
     
-    await notify_admin(f"🚨 **RESET EFFECTUÉ**\nRaison: {reason}\nLe bot repart à zéro.")
+    await notify_admin(f"🚨 **RESET EFFECTUÉ**\nRaison: {reason}")
     logger.warning("✅ Reset terminé")
 
 async def check_prediction_timeouts():
-    """Vérifie les timeouts de prédiction (20min)."""
     while True:
         try:
             await asyncio.sleep(60)
@@ -829,13 +872,12 @@ async def check_prediction_timeouts():
             
             if expired:
                 logger.warning(f"🚨 {len(expired)} prédiction(s) en timeout!")
-                await perform_reset(f"Timeout prédiction après {PREDICTION_TIMEOUT_MINUTES}min")
+                await perform_reset(f"Timeout après {PREDICTION_TIMEOUT_MINUTES}min")
                 
         except Exception as e:
             logger.error(f"Erreur timeout check: {e}")
 
 async def schedule_daily_reset():
-    """Reset quotidien à 1h00 heure du Bénin (WAT)."""
     wat_tz = timezone(timedelta(hours=1))
     
     while True:
@@ -854,9 +896,11 @@ async def schedule_daily_reset():
 # --- Serveur Web ---
 
 async def index(request):
+    even_thr, odd_thr = get_current_thresholds()
+    
     html = f"""<!DOCTYPE html>
     <html>
-    <head><title>Bot</title>
+    <head><title>Bot Prédiction</title>
     <style>
         body {{ font-family: Arial; max-width: 600px; margin: 50px auto; padding: 20px; }}
         .box {{ background: #f0f0f0; padding: 20px; border-radius: 10px; }}
@@ -867,8 +911,8 @@ async def index(request):
         <div class="box">
             <p>✅ En ligne</p>
             <p>Dernier: #{last_game_number}</p>
-            <p>Mode: {'Auto' if auto_mode else 'Manuel'}</p>
-            <p>Écarts: P={auto_even_gap} I={auto_odd_gap}</p>
+            <p>Mode: {'🤖 AUTO' if auto_mode else '👤 MANUEL'}</p>
+            <p>Seuils: P={even_thr} I={odd_thr}</p>
             <p>Canaux: {len(DYNAMIC_PREDICTION_CHANNELS)}</p>
             <p>Actives: {len([p for p in pending_predictions.values() if p['status'] == '🔮'])}</p>
         </div>
@@ -895,13 +939,12 @@ async def start_web_server():
 async def start_bot():
     global source_channel_ok, DYNAMIC_PREDICTION_CHANNELS
     
-    # Charger les canaux sauvegardés au démarrage
     load_dynamic_channels()
     
     try:
         await client.start(bot_token=BOT_TOKEN)
         source_channel_ok = True
-        logger.info(f"✅ Bot connecté | {len(DYNAMIC_PREDICTION_CHANNELS)} canaux actifs")
+        logger.info(f"✅ Bot connecté | {len(DYNAMIC_PREDICTION_CHANNELS)} canaux")
         return True
     except Exception as e:
         logger.error(f"❌ Erreur: {e}")
