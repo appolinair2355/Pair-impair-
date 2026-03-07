@@ -108,16 +108,13 @@ def extract_game_number(message: str):
 
 def extract_G_value(message: str):
     """
-    Extrait la valeur de G (point du jour) du message.
-    Format: G(X♠️Y♠️Z♣️) ou G(X Y Z) ou G(X,Y,Z)
-    Exemple: G(8♠️3♠️2♣️) → 8+3+2 = 13
+    Extrait la valeur G du message.
+    G est le nombre immédiatement après ✅ (gagnant) ou 🔰 (égalité)
     """
-    match = re.search(r"G[\(\[]([\d\s,♠️♥️♦️♣️]+)[\)\]]", message, re.IGNORECASE)
+    # Cherche ✅ ou 🔰 suivi d'un nombre
+    match = re.search(r"[✅🔰](\d+)", message)
     if match:
-        content = match.group(1)
-        numbers = re.findall(r'\d+', content)
-        if numbers:
-            return sum(int(n) for n in numbers)
+        return int(match.group(1))
     return None
 
 def is_even(number: int) -> bool:
@@ -998,14 +995,6 @@ async def main():
     
     except Exception as e:
         logger.error(f"Erreur: {e}")
-    finally:
-        if client.is_connected():
-            await client.disconnect()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Arrêt")
-    except Exception as e:
-        logger.error(f"Fatal: {e}")
+    asyncio.run(main())
