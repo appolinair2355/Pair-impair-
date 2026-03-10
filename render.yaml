@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: oparvant
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: API_ID
+        value: 29177661
+      - key: API_HASH
+        value: a8639172fa8d35dbfd8ea46286d349ab
+      - key: BOT_TOKEN
+        value: 8442253971:AAEisYucgZ49Ej2b-mK9_6DhNrqh9WOc_XU
+      - key: ADMIN_ID
+        value: 1190237801
+      - key: SOURCE_CHANNEL_ID
+        value: "-1002682552255"
+      - key: PREDICTION_CHANNEL_IDS
+        value: "-1003725380926"
+      - key: TELEGRAM_SESSION
+        sync: false

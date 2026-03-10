@@ -109,10 +109,10 @@ def extract_game_number(message: str):
 def extract_G_value(message: str):
     """
     Extrait la valeur G du message.
-    G est le nombre immédiatement après ✅ (gagnant) ou 🔰 (égalité)
+    G est le premier score (côté gauche) du jeu, indépendamment du gagnant.
+    Format: #Nxxx. [✅]SCORE(cartes) [- / 🔰] [✅]SCORE(cartes)
     """
-    # Cherche ✅ ou 🔰 suivi d'un nombre
-    match = re.search(r"[✅🔰](\d+)", message)
+    match = re.search(r"#N\s*\d+[^\d]*?(\d+)", message)
     if match:
         return int(match.group(1))
     return None
